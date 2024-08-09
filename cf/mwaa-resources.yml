@@ -1,0 +1,448 @@
+Description:  This template deploys
+  - VPC security group to be used by MWAA
+  - IAM Execution role for MWAA
+  - MWAA environment
+  - Lambda function to tag resources
+  - Cloud Watch Dashboard
+
+Parameters:
+  VPCId:
+    Type: String
+    Description: The ID of the VPC
+  PrivateSubnet1:
+    Type: String
+    Description: The ID of the private subnet 1
+  PrivateSubnet2:
+    Type: String
+    Description: The ID of the private subnet 2
+  BucketArn:
+    Type: String
+    Description: The ARN of the S3 bucket
+  BucketName:
+    Type: String
+    Description: The name of the S3 bucket
+  EnvName:
+    Type: String
+    Description: The name of the environment
+    Default: sample-mwaa
+  Creator:
+    Type: String
+    Description: The creator of the environment
+  EnvironmentClass:
+    Type: String
+    Description: The class of the environment which determines the size of workers, schedulers, etc.
+    AllowedValues:
+      - mw1.small
+      - mw1.medium
+      - mw1.large
+      - mw1.xlarge
+      - mw1.2xlarge
+    ConstraintDescription: Must be one of mw1.small, mw1.medium, mw1.large, mw1.2xlarge
+    Default: mw1.small
+  MaxWorkerCount:
+    Type: Number
+    Description: The max count of workers in env
+    Default: 1
+    MinValue: 1
+    MaxValue: 25
+    ConstraintDescription: Value must be an integer between 1 and 25
+  
+Resources:
+  # MWAA Security group
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: "sgp-airflow-security-group"
+      GroupDescription: "Security group with a self-referencing inbound rule."
+      VpcId: !Ref VPCId
+
+  SecurityGroupIngress1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref SecurityGroup
+
+  SecurityGroupIngress2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref SecurityGroup
+
+  SecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: -1
+      CidrIp: 0.0.0.0/0
+
+  # IAM Role and policy
+  IAMExecutonRole: 
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: "iam-airflow-execution-role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - airflow-env.amazonaws.com
+                - airflow.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: "/service-role/"
+  ExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Roles:
+        - !Ref IAMExecutonRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: airflow:PublishMetrics
+            Resource:
+              - !Sub "arn:aws:airflow:${AWS::Region}:${AWS::AccountId}:environment/airflow-environment"
+          - Effect: Deny
+            Action: s3:ListAllMyBuckets
+            Resource:
+              - !Sub "${BucketArn}"
+              - !Sub "${BucketArn}/*"
+          - Effect: Allow
+            Action:
+              - "s3:GetObject*"
+              - "s3:GetBucket*"
+              - "s3:List*"
+            Resource:
+              - !Sub "${BucketArn}"
+              - !Sub "${BucketArn}/*"
+          - Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+            Resource: "*"
+
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:CreateLogGroup
+              - logs:PutLogEvents
+              - logs:GetLogEvents
+              - logs:GetLogRecord
+              - logs:GetLogGroupFields
+              - logs:GetQueryResults
+              - logs:DescribeLogGroups
+            Resource:
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:airflow-airflow-environment*"
+          - Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - sqs:ChangeMessageVisibility
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ReceiveMessage
+              - sqs:SendMessage
+            Resource:
+              - !Sub "arn:aws:sqs:${AWS::Region}:*:airflow-celery-*"
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - "kms:GenerateDataKey*"
+              - kms:Encrypt
+            NotResource: !Sub "arn:aws:kms:*:${AWS::AccountId}:key/*"
+            Condition:
+              StringLike:
+                "kms:ViaService":
+                  - !Sub "sqs.${AWS::Region}.amazonaws.com"
+
+  # MWAA Environment
+  AirflowEnvironment:
+    Type: AWS::MWAA::Environment
+    Properties:
+      AirflowConfigurationOptions: 
+        core.default_timezone: utc
+        logging.logging_level: INFO
+      AirflowVersion: 2.9.2
+      DagS3Path: dags
+      EndpointManagement: SERVICE
+      EnvironmentClass: !Ref EnvironmentClass
+      ExecutionRoleArn: !GetAtt IAMExecutonRole.Arn
+      LoggingConfiguration: 
+        DagProcessingLogs: 
+          Enabled: true
+          LogLevel: INFO
+        SchedulerLogs: 
+          Enabled: true
+          LogLevel: INFO
+        TaskLogs: 
+          Enabled: true
+          LogLevel: INFO
+        WebserverLogs: 
+          Enabled: true
+          LogLevel: INFO
+        WorkerLogs: 
+          Enabled: true
+          LogLevel: INFO
+      MaxWorkers: !Ref MaxWorkerCount
+      MinWorkers: 1
+      Name: airflow-environment
+      NetworkConfiguration: 
+        SecurityGroupIds: 
+          - !Ref SecurityGroup
+        SubnetIds: 
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      RequirementsS3Path: requirements/requirements.txt
+      Schedulers: 2
+      SourceBucketArn: !Ref BucketArn
+      StartupScriptS3Path: startup/startup-script.sh
+      Tags: 
+        Project: Personal
+        Environment: Dev
+        Creator: !Ref Creator
+        Owner: !Ref Creator
+        Version: 0.1.0
+        Name: !Ref EnvName
+      WebserverAccessMode: PUBLIC_ONLY
+      WeeklyMaintenanceWindowStart: SUN:16:00 # this is in UTC - equivalent to midnight Perth time
+
+  # Lambda function to create additional resources
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: 'LambdaPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:TagLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/lambda-airflow-additional-resources:*"
+              - Effect: 'Allow'
+                Action:
+                  - logs:TagLogGroup
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:airflow-*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${BucketArn}/lambda/*"
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVpcEndpoints
+                Resource: "*"
+              - Effect: 'Allow'
+                Action:
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:ModifyVpcEndpoint
+                Resource: "arn:aws:ec2:*:*:vpc-endpoint/*"
+
+  AdditionalResourcesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: lambda-airflow-additional-resources
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref BucketName
+        S3Key: lambda/airflow-lambda.zip
+      Runtime: python3.11
+      Timeout: 120
+
+  AdditionalResources:
+    Type: Custom::AdditionalResources
+    Properties:
+      ServiceToken: !GetAtt AdditionalResourcesFunction.Arn
+      ServiceTimeout: 120
+      LogGroupArns:
+        - !GetAtt AirflowEnvironment.LoggingConfiguration.DagProcessingLogs.CloudWatchLogGroupArn
+        - !GetAtt AirflowEnvironment.LoggingConfiguration.SchedulerLogs.CloudWatchLogGroupArn
+        - !GetAtt AirflowEnvironment.LoggingConfiguration.TaskLogs.CloudWatchLogGroupArn
+        - !GetAtt AirflowEnvironment.LoggingConfiguration.WebserverLogs.CloudWatchLogGroupArn
+        - !GetAtt AirflowEnvironment.LoggingConfiguration.WorkerLogs.CloudWatchLogGroupArn
+      VPCDatabaseEndpointService: !GetAtt AirflowEnvironment.DatabaseVpcEndpointService
+      Tags:
+        Project: Personal
+        Environment: Dev
+        Creator: !Ref Creator
+        Owner: !Ref Creator
+        Version: 0.1.0
+        Name: !Ref EnvName
+
+  CloudWatchDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: "cfn-airflow-dashboard"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+              {
+                  "height": 6,
+                  "width": 18,
+                  "y": 0,
+                  "x": 0,
+                  "type": "metric",
+                  "properties": {
+                      "metrics": [
+                          [ "AmazonMWAA", "RunningTasks", "Function", "Executor", "Environment", "airflow-environment", { "stat": "Average" } ],
+                          [ ".", "QueuedTasks", ".", ".", ".", "." ]
+                      ],
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "region": "${AWS::Region}",
+                      "stat": "Sum",
+                      "period": 300,
+                      "title": "TaskExecution-Running,Queued"
+                  }
+              },
+              {
+                  "height": 6,
+                  "width": 6,
+                  "y": 0,
+                  "x": 18,
+                  "type": "metric",
+                  "properties": {
+                      "view": "timeSeries",
+                      "stacked": true,
+                      "metrics": [
+                          [ "AWS/MWAA", "RunningTasks", "Environment", "airflow-environment", { "region": "${AWS::Region}" } ],
+                          [ ".", "QueuedTasks", ".", ".", { "region": "${AWS::Region}" } ]
+                      ],
+                      "region": "${AWS::Region}",
+                      "stat": "Maximum",
+                      "period": 300,
+                      "title": "Queue-QueuedTasks,RunningTasks"
+                  }
+              },
+              {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 6,
+                  "type": "metric",
+                  "properties": {
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "metrics": [
+                          [ "AWS/MWAA", "CPUUtilization", "Cluster", "BaseWorker", "Environment", "airflow-environment", { "region": "${AWS::Region}" } ],
+                          [ "...", "AdditionalWorker", ".", ".", { "region": "${AWS::Region}" } ],
+                          [ "...", "Scheduler", ".", ".", { "region": "${AWS::Region}" } ],
+                          [ "...", "WebServer", ".", ".", { "region": "${AWS::Region}" } ]
+                      ],
+                      "region": "${AWS::Region}",
+                      "title": "CPUUtilisation",
+                      "period": 300
+                  }
+              },
+              {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 12,
+                  "type": "metric",
+                  "properties": {
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "metrics": [
+                          [ "AWS/MWAA", "MemoryUtilization", "Cluster", "BaseWorker", "Environment", "airflow-environment" ],
+                          [ "...", "AdditionalWorker", ".", "." ],
+                          [ "...", "Scheduler", ".", "." ],
+                          [ "...", "WebServer", ".", "." ]
+                      ],
+                      "region": "${AWS::Region}",
+                      "title": "MemoryUtilisation"
+                  }
+              },
+              {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 0,
+                  "type": "metric",
+                  "properties": {
+                      "metrics": [
+                          [ "AWS/MWAA", "CPUUtilization", "Cluster", "BaseWorker", "Environment", "airflow-environment", { "region": "${AWS::Region}" } ],
+                          [ "...", "AdditionalWorker", ".", ".", { "region": "${AWS::Region}" } ]
+                      ],
+                      "view": "timeSeries",
+                      "stacked": true,
+                      "region": "${AWS::Region}",
+                      "stat": "SampleCount",
+                      "period": 60,
+                      "title": "WorkerCount",
+                      "setPeriodToTimeRange": true
+                  }
+              },
+              {
+                  "height": 6,
+                  "width": 6,
+                  "y": 6,
+                  "x": 18,
+                  "type": "metric",
+                  "properties": {
+                      "view": "timeSeries",
+                      "stacked": false,
+                      "metrics": [
+                          [ "AmazonMWAA", "TasksKilledExternally", "Function", "Scheduler", "Environment", "airflow-environment" ]
+                      ],
+                      "region": "${AWS::Region}",
+                      "title": "FailedTaskWithNoLogs"
+                  }
+              },
+              {
+                  "height": 5,
+                  "width": 24,
+                  "y": 12,
+                  "x": 0,
+                  "type": "metric",
+                  "properties": {
+                      "metrics": [
+                          [ "AWS/Logs", "IncomingLogEvents", "LogGroupName", "airflow-airflow-environment-DAGProcessing", { "region": "${AWS::Region}" } ],
+                          [ "...", "airflow-airflow-environment-Scheduler", { "region": "${AWS::Region}" } ],
+                          [ "...", "airflow-airflow-environment-Task", { "region": "${AWS::Region}" } ],
+                          [ "...", "airflow-airflow-environment-WebServer", { "region": "${AWS::Region}" } ],
+                          [ "...", "airflow-airflow-environment-Worker", { "region": "${AWS::Region}" } ]
+                      ],
+                      "region": "${AWS::Region}",
+                      "stat": "Sum",
+                      "period": 300,
+                      "view": "timeSeries",
+                      "stacked": false
+                  }
+              }
+          ]
+        }
+
+Outputs:
+  ExecutionRoleArn:
+    Description: The Arn of the Airflow Execution Role
+    Value: !GetAtt IAMExecutonRole.Arn
+  EnvironmentArn:
+    Description: The Anr of the MWAA environment
+    Value: !GetAtt AirflowEnvironment.Arn
+  CloudWatchDashboardName:
+    Description: The name of the Cloud Watch dashboard
+    Value: !Ref CloudWatchDashboard
