@@ -1,6 +1,8 @@
 # Deploying MWAA with Cloud Formation in Public Network aceess mode
 A Cloud Formation project that deploys MWAA into a given AWS account.
 
+Code in this repo was used for Mechanical Rock blog post [Deploying MWAA with Cloud Formation Part 1](https://blog.mechanicalrock.io/2024/08/12/deploying-mwaa-with-cloudformation-part1.html)
+
 This MWAA setup uses the following:
 - service managed VPC endpoints
 - public web server access mode
